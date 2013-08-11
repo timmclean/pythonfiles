@@ -1,6 +1,7 @@
+import errno
 import os
 
-__all__ = ['Path', 'Directory']
+__all__ = ['Path']
 
 class Path:
 	"""
@@ -19,6 +20,8 @@ class Path:
 	"""
 
 	def __init__(self, *parts):
+		fullPath = ''
+
 		for i, part in enumerate(parts):
 			if i > 0 and os.path.isabs(part):
 				prevPart = parts[i - 1]
@@ -26,10 +29,10 @@ class Path:
 					'Cannot join %s and %s' % (repr(prevPart), repr(part))
 				)
 
-		if len(parts) > 0:
-			fullPath = os.path.join(*parts)
-		else:
-			fullPath = ''
+			if isinstance(part, Path):
+				fullPath = os.path.join(fullPath, part._value)
+			elif isinstance(part, basestring):
+				fullPath = os.path.join(fullPath, part)
 
 		self._value = os.path.normpath(fullPath)
 
@@ -38,6 +41,18 @@ class Path:
 
 	def __repr__(self):
 		return 'Path(%s)' % repr(self._value)
+
+	def __eq__(self, another):
+		if not isinstance(another, Path):
+			return NotImplemented
+
+		return self._value == another._value
+
+	def __ne__(self, another):
+		if not isinstance(another, Path):
+			return NotImplemented
+
+		return self._value != another._value
 
 	@property
 	def isAbsolute(self):
@@ -74,7 +89,9 @@ class Path:
 
 		return Path(parentPath)
 
-	def toAbsolute(self, context):
+	def toAbsolute(self, context=None):
+		context = context or os.getcwd()
+
 		if self.isAbsolute:
 			return self
 
@@ -98,14 +115,60 @@ class Path:
 
 		return Path(os.path.relpath(self._value, ancestor._value))
 
-	def asDirectory(self):
-		return Directory(self)
+	def exists(self):
+		return os.path.exists(str(self))
 
-class Directory:
-	def __init__(self, path):
-		if isinstance(path, basestring):
-			self.path = Path(path)
-		elif isintance(path, Path):
-			self.path = path
+	def existsAsFile(self):
+		return os.path.isfile(str(self))
+
+	def existsAsDirectory(self):
+		return os.path.isdir(str(self))
+
+	# TODO Add mode argument
+	def makeDirectory(self, ancestors=True, failOnExist=False):
+		if ancestors:
+			# Build list of missing ancestors
+			ancestorsToCreate = []
+			curAncestor = self.toAbsolute().parent
+			while curAncestor:
+				if curAncestor.exists():
+					break
+
+				# Insert at front
+				ancestorsToCreate.insert(0, curAncestor)
+
+				# Continue up tree
+				curAncestor = curAncestor.parent
+
+			# Create missing ancestors
+			for ancestor in ancestorsToCreate:
+				# Could only exist due to race conditions, so ignore failures
+				ancestor.makeDirectory(ancestors=False, failOnExist=False)
+
+			# Create this directory
+			self.makeDirectory(ancestors=False, failOnExist=failOnExist)
 		else:
-			raise TypeError('Expected path but received ' + type(path).__name__)
+			try:
+				# Try to create
+				os.mkdir(str(self))
+			except OSError as err:
+				# Ignore if the directory already exists and failOnExist is False
+				if err.errno == errno.EEXIST and os.path.isdir(str(self)):
+					if failOnExist:
+						raise
+					else:
+						return
+
+				raise
+
+	def find(self):
+		if self.existsAsFile():
+			yield self
+		elif self.existsAsDirectory():
+			for dirPath, subdirNames, fileNames in os.walk(str(self)):
+				yield Path(dirPath)
+
+				for fileName in fileNames:
+					yield Path(dirPath, fileName)
+		else:
+			raise OSError('No such file or directory: ' + repr(str(self)))
